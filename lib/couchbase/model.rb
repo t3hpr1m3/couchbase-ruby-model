@@ -121,9 +121,6 @@ module Couchbase
     attr_reader :meta
 
     # @since 0.4.5
-    attr_reader :errors
-
-    # @since 0.4.5
     attr_reader :raw
 
     # @private Container for all attributes with defaults of all subclasses
@@ -322,13 +319,7 @@ module Couchbase
       names.each do |name|
         name = name.to_sym
         attributes[name] = options[:default]
-        next if self.instance_methods.include?(name)
-        define_method(name) do
-          read_attribute(name)
-        end
-        define_method(:"#{name}=") do |value|
-          write_attribute(name, value)
-        end
+        define_attribute_methods name
       end
     end
 
@@ -427,6 +418,10 @@ module Couchbase
       _find(false, *id)
     end
 
+    def self.get(*id)
+      find_by_id(*id)
+    end
+
     # Find the model using +id+ attribute
     #
     # Unlike {Couchbase::Model.find}, this method won't raise
@@ -475,7 +470,7 @@ module Couchbase
     #
     # @param [Hash] attrs attribute-value pairs
     def initialize(attrs = {})
-      @errors = ::ActiveModel::Errors.new(self) if defined?(::ActiveModel)
+      #@errors = ::ActiveModel::Errors.new(self) if defined?(::ActiveModel)
       @_attributes = ::Hash.new do |h, k|
         default = self.class.attributes[k]
         h[k] = if default.respond_to?(:call)
@@ -495,10 +490,11 @@ module Couchbase
         @doc = attrs.delete(:doc)
         @meta = attrs.delete(:meta)
         @raw = attrs.delete(:raw)
-        update_attributes(@doc || attrs)
+        self.attributes = @doc || attrs
       else
         @raw = attrs
       end
+      run_callbacks :initialize
     end
 
     # Create this model and assign new id if necessary
@@ -514,20 +510,22 @@ module Couchbase
     #   p = Post.new(:title => 'Hello world', :draft => true)
     #   p.create
     def create(options = {})
-      @id ||= Couchbase::Model::UUID.generator.next(1, model.thread_storage[:uuid_algorithm])
-      if respond_to?(:valid?) && !valid?
-        return false
-      end
-      options = model.defaults.merge(options)
-      value = (options[:format] == :plain) ?  @raw : attributes_with_values
-      unless @meta
-        @meta = {}
-        if @meta.respond_to?(:with_indifferent_access)
-          @meta = @meta.with_indifferent_access
+      run_callbacks :create do
+        @id ||= Couchbase::Model::UUID.generator.next(1, model.thread_storage[:uuid_algorithm])
+        if respond_to?(:valid?) && !valid?
+          return false
         end
+        options = model.defaults.merge(options)
+        value = (options[:format] == :plain) ?  @raw : attributes_with_values
+        unless @meta
+          @meta = {}
+          if @meta.respond_to?(:with_indifferent_access)
+            @meta = @meta.with_indifferent_access
+          end
+        end
+        @meta['cas'] = model.bucket.add(@id, value, options)
+        self
       end
-      @meta['cas'] = model.bucket.add(@id, value, options)
-      self
     end
 
     # Creates an object just like {{Model#create} but raises an exception if
@@ -561,14 +559,21 @@ module Couchbase
     #   p.save('cas' => p.meta['cas'])
     #
     def save(options = {})
-      return create(options) unless @meta
-      if respond_to?(:valid?) && !valid?
-        return false
+      run_callbacks :save do
+        if @meta
+          if respond_to?(:valid?) && !valid?
+            return false
+          end
+          options = model.defaults.merge(options)
+          value = (options[:format] == :plain) ?  @raw : attributes_with_values
+          @meta['cas'] = model.bucket.replace(@id, value, options)
+          @previously_changed = changes
+          @changed_attributes.clear
+          self
+        else
+          create(options)
+        end
       end
-      options = model.defaults.merge(options)
-      value = (options[:format] == :plain) ?  @raw : attributes_with_values
-      @meta['cas'] = model.bucket.replace(@id, value, options)
-      self
     end
 
     # Creates an object just like {{Model#save} but raises an exception if
@@ -591,8 +596,9 @@ module Couchbase
     #   {{Couchbase::Bucket#set}}
     # @return [Couchbase::Model] The updated object
     def update(attrs, options = {})
-      update_attributes(attrs)
-      save(options)
+      run_callbacks :update do
+        update_attributes(attrs, options)
+      end
     end
 
     # Delete this object from the bucket
@@ -605,15 +611,17 @@ module Couchbase
     #   {{Couchbase::Bucket#delete}}
     # @return [Couchbase::Model] Returns a reference of itself.
     #
-    # @example Delete the Post model
+    # @example Destroy the Post model
     #   p = Post.find('hello-world')
-    #   p.delete
-    def delete(options = {})
-      raise Couchbase::Error::MissingId, 'missing id attribute' unless @id
-      model.bucket.delete(@id, options)
-      @id = nil
-      @meta = nil
-      self
+    #   p.destroy
+    def destroy(options = {})
+      run_callbacks :destroy do
+        raise Couchbase::Error::MissingId, 'missing id attribute' unless @id
+        model.bucket.delete(@id, options)
+        @id = nil
+        @meta = nil
+        self
+      end
     end
 
     # Check if the record have +id+ attribute
@@ -699,22 +707,33 @@ module Couchbase
     # @since 0.0.1
     #
     # @return [Hash]
-    def attributes
-      @_attributes
-    end
+    #def attributes
+    #  @_attributes
+    #end
 
     # Update all attributes without persisting the changes.
     #
     # @since 0.0.1
     #
     # @param [Hash] attrs attribute-value pairs.
-    def update_attributes(attrs)
+    def update_attributes(attrs, options={})
+      self.attributes = attrs
+      self.save(options)
+    end
+
+    def attributes=(attrs)
       if id = attrs.delete(:id)
         @id = id
       end
       attrs.each do |key, value|
         setter = :"#{key}="
         send(setter, value) if respond_to?(setter)
+      end
+    end
+
+    def attributes
+      self.class.attributes.keys.inject({}) do |h, k|
+        h[k] = read_attribute(k); h
       end
     end
 
@@ -729,7 +748,7 @@ module Couchbase
     def reload
       raise Couchbase::Error::MissingId, 'missing id attribute' unless @id
       pristine = model.find(@id)
-      update_attributes(pristine.attributes)
+      self.attributes = pristine.attributes
       @meta[:cas] = pristine.meta[:cas]
       self
     end

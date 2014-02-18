@@ -8,18 +8,21 @@ module Couchbase
         include ::ActiveModel::Conversion
         include ::ActiveModel::Validations
         include ::ActiveModel::Validations::Callbacks
+        include ::ActiveModel::AttributeMethods
+        include ::ActiveModel::Dirty
 
-        define_model_callbacks :create, :update, :delete, :save, :initialize
-        [:save, :create, :update, :delete, :initialize].each do |meth|
-          class_eval <<-EOC
-            alias #{meth}_without_callbacks #{meth}
-            def #{meth}(*args, &block)
-              run_callbacks(:#{meth}) do
-                #{meth}_without_callbacks(*args, &block)
-              end
-            end
-          EOC
-        end
+        attribute_method_suffix '='
+        define_model_callbacks :create, :update, :destroy, :save, :initialize
+        #[:save, :create, :update, :destroy, :initialize].each do |meth|
+        #  class_eval <<-EOC
+        #    alias #{meth}_without_callbacks #{meth}
+        #    def #{meth}(*args, &block)
+        #      run_callbacks(:#{meth}) do
+        #        #{meth}_without_callbacks(*args, &block)
+        #      end
+        #    end
+        #  EOC
+        #end
       end
     end
 
@@ -63,6 +66,20 @@ module Couchbase
     # Returns a string representing the unique key.
     def ==(other)
       hash == other.hash
+    end
+
+    private
+
+    def attribute(name)
+      read_attribute name.to_sym
+    end
+
+    def attribute=(name, value)
+      name = name.to_sym
+      unless read_attribute(name).eql?(value)
+        attribute_will_change!(name)
+        write_attribute(name, value)
+      end
     end
 
   end
