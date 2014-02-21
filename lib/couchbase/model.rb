@@ -418,10 +418,6 @@ module Couchbase
       _find(false, *id)
     end
 
-    def self.get(*id)
-      find_by_id(*id)
-    end
-
     # Find the model using +id+ attribute
     #
     # Unlike {Couchbase::Model.find}, this method won't raise
@@ -868,6 +864,8 @@ module Couchbase
     end
 
     include Couchbase::ActiveModel
+
+    ActiveSupport.run_load_hooks(:couchbase_model, self)
   end
 
 end
